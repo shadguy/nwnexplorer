@@ -1813,12 +1813,13 @@ static void DecompressDdsColorBlock (unsigned char *pauchData, D3DCOLOR *pDstBit
 }
 
 static D3DCOLOR *DdsDecodeBlocks (unsigned char *pauchData,
-                                  int nWidth, int nHeight,
-                                  int nAlphaMode)
+                                  int nWidth,
+                                  int nHeight,
+                                  int nAlphaMode,
+                                  BOOL bPremultiplied)
 {
     int nBlockWidth = (nWidth + 3) & ~3;
     int nBlockHeight = (nHeight + 3) & ~3;
-    int nBlockSize = nAlphaMode == 0 ? 8 : 16;
 
     D3DCOLOR *pPaddedData =
         new D3DCOLOR [nBlockWidth * nBlockHeight];
@@ -1883,6 +1884,39 @@ static D3DCOLOR *DdsDecodeBlocks (unsigned char *pauchData,
             pData + y * nWidth,
             pPaddedData + y * nBlockWidth,
             sizeof (D3DCOLOR) * nWidth);
+    }
+
+    if (bPremultiplied)
+    {
+        for (int i = 0; i < nWidth * nHeight; i++)
+        {
+            int nAlpha = RGBA_GETALPHA (pData [i]);
+
+            if (nAlpha > 0 && nAlpha < 255)
+            {
+                int nRed =
+                    (RGBA_GETRED (pData [i]) * 255 + nAlpha / 2) / nAlpha;
+                int nGreen =
+                    (RGBA_GETGREEN (pData [i]) * 255 + nAlpha / 2) / nAlpha;
+                int nBlue =
+                    (RGBA_GETBLUE (pData [i]) * 255 + nAlpha / 2) / nAlpha;
+
+                if (nRed > 255)
+                    nRed = 255;
+
+                if (nGreen > 255)
+                    nGreen = 255;
+
+                if (nBlue > 255)
+                    nBlue = 255;
+
+                pData [i] = RGBA_MAKE (
+                    nBlue,
+                    nGreen,
+                    nRed,
+                    nAlpha);
+            }
+        }
     }
 
     delete [] pPaddedData;
@@ -1970,21 +2004,38 @@ D3DCOLOR *DdsLoad (unsigned char *pauchData, int *pnWidth, int *pnHeight)
         const DWORD dwDXT1 =
             ('D' | ('X' << 8) | ('T' << 16) | ('1' << 24));
 
+        const DWORD dwDXT2 =
+            ('D' | ('X' << 8) | ('T' << 16) | ('2' << 24));
+
         const DWORD dwDXT3 =
             ('D' | ('X' << 8) | ('T' << 16) | ('3' << 24));
+
+        const DWORD dwDXT4 =
+            ('D' | ('X' << 8) | ('T' << 16) | ('4' << 24));
 
         const DWORD dwDXT5 =
             ('D' | ('X' << 8) | ('T' << 16) | ('5' << 24));
 
         int nAlphaMode;
+        BOOL bPremultiplied = FALSE;
 
         if (pHeader->pixelFormat.fourCC == dwDXT1)
         {
             nAlphaMode = 0;
         }
+        else if (pHeader->pixelFormat.fourCC == dwDXT2)
+        {
+            nAlphaMode = 1;
+            bPremultiplied = TRUE;
+        }
         else if (pHeader->pixelFormat.fourCC == dwDXT3)
         {
             nAlphaMode = 1;
+        }
+        else if (pHeader->pixelFormat.fourCC == dwDXT4)
+        {
+            nAlphaMode = 2;
+            bPremultiplied = TRUE;
         }
         else if (pHeader->pixelFormat.fourCC == dwDXT5)
         {
@@ -1992,11 +2043,6 @@ D3DCOLOR *DdsLoad (unsigned char *pauchData, int *pnWidth, int *pnHeight)
         }
         else
         {
-            //
-            // The block decoder currently supports DXT1, DXT3 and DXT5.
-            // Reject uncompressed, DX10 and newer BC formats here.
-            //
-
             return NULL;
         }
 
@@ -2017,7 +2063,8 @@ D3DCOLOR *DdsLoad (unsigned char *pauchData, int *pnWidth, int *pnHeight)
             pauchData + sizeof (DWORD) + sizeof (DDS_HEADER),
             nWidth,
             nHeight,
-            nAlphaMode);
+            nAlphaMode,
+            bPremultiplied);
 
         if (pData == NULL)
             return NULL;
@@ -2065,7 +2112,8 @@ D3DCOLOR *DdsLoad (unsigned char *pauchData, int *pnWidth, int *pnHeight)
         pauchData + sizeof (NWN_DDS_HEADER),
         nWidth,
         nHeight,
-        nAlphaMode);
+        nAlphaMode,
+        FALSE);
 
     if (pData == NULL)
         return NULL;
