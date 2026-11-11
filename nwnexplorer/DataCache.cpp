@@ -975,7 +975,7 @@ CData *CDataCache::LoadTGAorDDSTexture (CNwnModuleFile *psModule,
             *pauchOut++ = RGBA_GETALPHA (pData [i]);
         }
     }
-    delete pData;
+    delete [] pData;
 
     //
     // Create the texture

@@ -1812,66 +1812,273 @@ static void DecompressDdsColorBlock (unsigned char *pauchData, D3DCOLOR *pDstBit
     }
 }
 
+static D3DCOLOR *DdsDecodeBlocks (unsigned char *pauchData,
+                                  int nWidth, int nHeight,
+                                  int nAlphaMode)
+{
+    int nBlockWidth = (nWidth + 3) & ~3;
+    int nBlockHeight = (nHeight + 3) & ~3;
+    int nBlockSize = nAlphaMode == 0 ? 8 : 16;
+
+    D3DCOLOR *pPaddedData =
+        new D3DCOLOR [nBlockWidth * nBlockHeight];
+
+    if (pPaddedData == NULL)
+        return NULL;
+
+    //
+    // Decode the image into a padded buffer. DDS blocks are always 4x4,
+    // while the image itself may have dimensions that are not multiples of 4.
+    //
+
+    for (int y = 0; y < nBlockHeight; y += 4)
+    {
+        for (int x = 0; x < nBlockWidth; x += 4)
+        {
+            if (nAlphaMode == 1)
+            {
+                DecompressDdsDXT3AlphaBlock (
+                    pauchData, pPaddedData, x, y, nBlockWidth);
+                pauchData += 8;
+            }
+            else if (nAlphaMode == 2)
+            {
+                DecompressDdsDXT5AlphaBlock (
+                    pauchData, pPaddedData, x, y, nBlockWidth);
+                pauchData += 8;
+            }
+
+            //
+            // colors == 3 enables DXT1 one-bit alpha handling.
+            // colors == 4 preserves the alpha decoded above.
+            //
+
+            DecompressDdsColorBlock (
+                pauchData,
+                pPaddedData,
+                x,
+                y,
+                nBlockWidth,
+                nAlphaMode == 0 ? 3 : 4);
+
+            pauchData += 8;
+        }
+    }
+
+    //
+    // Copy the unpadded image into the result buffer.
+    //
+
+    D3DCOLOR *pData = new D3DCOLOR [nWidth * nHeight];
+
+    if (pData == NULL)
+    {
+        delete [] pPaddedData;
+        return NULL;
+    }
+
+    for (int y = 0; y < nHeight; y++)
+    {
+        memcpy (
+            pData + y * nWidth,
+            pPaddedData + y * nBlockWidth,
+            sizeof (D3DCOLOR) * nWidth);
+    }
+
+    delete [] pPaddedData;
+
+    return pData;
+}
+
 D3DCOLOR *DdsLoad (unsigned char *pauchData, int *pnWidth, int *pnHeight)
 {
-    typedef struct {
+    //
+    // Existing BioWare/NWN DDS header.
+    //
+
+    typedef struct
+    {
         DWORD width;
         DWORD height;
         DWORD colors;
         DWORD reserved1;
         DWORD reserved2;
+    } NWN_DDS_HEADER;
+
+    //
+    // Standard DDS pixel-format header.
+    //
+
+    typedef struct
+    {
+        DWORD size;
+        DWORD flags;
+        DWORD fourCC;
+        DWORD bitCount;
+        DWORD RBitMask;
+        DWORD GBitMask;
+        DWORD BBitMask;
+        DWORD ABitMask;
+    } DDS_PIXELFORMAT;
+
+    //
+    // Standard Microsoft DDS header.
+    //
+
+    typedef struct
+    {
+        DWORD size;
+        DWORD flags;
+        DWORD height;
+        DWORD width;
+        DWORD pitchOrLinearSize;
+        DWORD depth;
+        DWORD mipMapCount;
+        DWORD reserved1 [11];
+        DDS_PIXELFORMAT pixelFormat;
+        DWORD caps;
+        DWORD caps2;
+        DWORD caps3;
+        DWORD caps4;
+        DWORD reserved2;
     } DDS_HEADER;
 
-    //
-    // Get the image information
-    //
-
-    DDS_HEADER *pdds = (DDS_HEADER *) pauchData;
-    if (pdds->colors != 3 && pdds->colors != 4)
-        return NULL;
+    DWORD dwMagic = 0;
+    memcpy (&dwMagic, pauchData, sizeof (dwMagic));
 
     //
-    // Allocate the data
+    // Standard DDS files begin with "DDS ".
     //
 
-    D3DCOLOR *pDstBits = new D3DCOLOR [pdds->width * pdds->height];
-    if (pDstBits == NULL)
-        return NULL;
+    if (dwMagic == ('D' | ('D' << 8) | ('S' << 16) | (' ' << 24)))
+    {
+        DDS_HEADER *pHeader =
+            (DDS_HEADER *)(pauchData + sizeof (DWORD));
 
-    //
-    // Skip the id information
-    //
-
-    pauchData += sizeof (DDS_HEADER);
-
-
-    int x = 0, y = 0;
-
-    while (y < pdds->height) {
-        if (0) {
-            DecompressDdsDXT3AlphaBlock(pauchData, pDstBits, x, y, pdds->width);
-            pauchData += 8;
-        } else if (pdds->colors == 4) {
-            DecompressDdsDXT5AlphaBlock(pauchData, pDstBits, x, y, pdds->width);
-            pauchData += 8;
+        if (pHeader->size != 124 ||
+            pHeader->pixelFormat.size != 32 ||
+            pHeader->width == 0 ||
+            pHeader->height == 0)
+        {
+            return NULL;
         }
 
-        DecompressDdsColorBlock(pauchData, pDstBits, x, y, pdds->width, pdds->colors);
-        pauchData += 8;
+        //
+        // FourCC values are stored little-endian.
+        //
 
-        x += 4;
-        if (x >= pdds->width) {
-            x  = 0;
-            y += 4;
+        const DWORD dwDXT1 =
+            ('D' | ('X' << 8) | ('T' << 16) | ('1' << 24));
+
+        const DWORD dwDXT3 =
+            ('D' | ('X' << 8) | ('T' << 16) | ('3' << 24));
+
+        const DWORD dwDXT5 =
+            ('D' | ('X' << 8) | ('T' << 16) | ('5' << 24));
+
+        int nAlphaMode;
+
+        if (pHeader->pixelFormat.fourCC == dwDXT1)
+        {
+            nAlphaMode = 0;
         }
+        else if (pHeader->pixelFormat.fourCC == dwDXT3)
+        {
+            nAlphaMode = 1;
+        }
+        else if (pHeader->pixelFormat.fourCC == dwDXT5)
+        {
+            nAlphaMode = 2;
+        }
+        else
+        {
+            //
+            // The block decoder currently supports DXT1, DXT3 and DXT5.
+            // Reject uncompressed, DX10 and newer BC formats here.
+            //
+
+            return NULL;
+        }
+
+        if (pHeader->width > INT_MAX ||
+            pHeader->height > INT_MAX)
+        {
+            return NULL;
+        }
+
+        int nWidth = (int)pHeader->width;
+        int nHeight = (int)pHeader->height;
+
+        //
+        // The first mip level immediately follows the standard header.
+        //
+
+        D3DCOLOR *pData = DdsDecodeBlocks (
+            pauchData + sizeof (DWORD) + sizeof (DDS_HEADER),
+            nWidth,
+            nHeight,
+            nAlphaMode);
+
+        if (pData == NULL)
+            return NULL;
+
+        if (pnWidth != NULL)
+            *pnWidth = nWidth;
+
+        if (pnHeight != NULL)
+            *pnHeight = nHeight;
+
+        return pData;
     }
 
-    if (pnWidth)
-        *pnWidth = pdds ->width;
-    if (pnHeight)
-        *pnHeight = pdds ->height;
-    return pDstBits;
+    //
+    // Otherwise, interpret the resource as the original BioWare format.
+    //
+
+    NWN_DDS_HEADER *pHeader = (NWN_DDS_HEADER *)pauchData;
+
+    if (pHeader->width == 0 ||
+        pHeader->height == 0 ||
+        (pHeader->colors != 3 && pHeader->colors != 4))
+    {
+        return NULL;
+    }
+
+    if (pHeader->width > INT_MAX ||
+        pHeader->height > INT_MAX)
+    {
+        return NULL;
+    }
+
+    int nWidth = (int)pHeader->width;
+    int nHeight = (int)pHeader->height;
+
+    //
+    // The original format uses the same block layout as the current
+    // implementation: colors == 3 is DXT1-style alpha and colors == 4
+    // is DXT5-style alpha.
+    //
+
+    int nAlphaMode = pHeader->colors == 3 ? 0 : 2;
+
+    D3DCOLOR *pData = DdsDecodeBlocks (
+        pauchData + sizeof (NWN_DDS_HEADER),
+        nWidth,
+        nHeight,
+        nAlphaMode);
+
+    if (pData == NULL)
+        return NULL;
+
+    if (pnWidth != NULL)
+        *pnWidth = nWidth;
+
+    if (pnHeight != NULL)
+        *pnHeight = nHeight;
+
+    return pData;
 }
+
 
 //-----------------------------------------------------------------------------
 //
